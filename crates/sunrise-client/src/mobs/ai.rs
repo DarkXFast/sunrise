@@ -1172,8 +1172,12 @@ pub enum Pause {
     InsideEffects(InsidePause),
     /// `LivingEntity.updatingUsingItem` raised this tick's spear stabs. `LivingEntity.stabAttack`
     /// hurts and pushes each target and slows the attacker (`causeExtraKnockback`) before
-    /// `aiStep` moves it, so the owner settles the tick's events so far before resuming.
-    Stab,
+    /// `aiStep` moves it, so the owner settles them before resuming. They are the last `events`
+    /// of the tick's events; the ones before them (the base tick's sounds, a leash break) keep
+    /// their usual delivery.
+    Stab {
+        events: usize,
+    },
 }
 
 /// Where a mob tick paused for staged `register_behaviors`.
@@ -1359,22 +1363,36 @@ pub fn tick(
     events: &mut Vec<MobEvent>,
 ) -> bool {
     let progress = tick_until_pause(m, w, level, events, None);
-    run_hostless(m, w, level, events, progress, false).expect("a hostless tick runs through stabs")
+    match run_hostless(m, w, level, events, progress, false) {
+        UntilStab::Complete(kept) => kept,
+        UntilStab::Stabbed { .. } => unreachable!("a hostless tick runs through its stabs"),
+    }
+}
+
+/// How far [`tick_until_stab`] ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UntilStab {
+    /// The whole tick ran: whether the mob stays.
+    Complete(bool),
+    /// It stopped after `LivingEntity.updatingUsingItem` raised stabs: they are the last
+    /// `events` of the events, and [`resume_hostless_after_stab`] finishes the tick.
+    Stabbed { events: usize },
 }
 
 /// [`tick`], stopping at [`Pause::Stab`] so the caller settles the stabs in `events` before
-/// the mob moves: `None` then, and [`resume_hostless_after_stab`] finishes the tick.
+/// the mob moves.
 pub fn tick_until_stab(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
-) -> Option<bool> {
+) -> UntilStab {
     let progress = tick_until_pause(m, w, level, events, None);
     run_hostless(m, w, level, events, progress, true)
 }
 
-/// Finish a hostless tick that [`tick_until_stab`] stopped at its stabs.
+/// Finish a hostless tick that [`tick_until_stab`] stopped at its stabs: none of it runs if
+/// settling them removed the mob.
 pub fn resume_hostless_after_stab(
     m: &mut Mob,
     w: &MobWorld,
@@ -1382,10 +1400,13 @@ pub fn resume_hostless_after_stab(
     events: &mut Vec<MobEvent>,
 ) -> bool {
     let progress = resume_after_stab(m, w, level, events, None);
-    run_hostless(m, w, level, events, progress, false).expect("a tick stabs once")
+    match run_hostless(m, w, level, events, progress, false) {
+        UntilStab::Complete(kept) => kept,
+        UntilStab::Stabbed { .. } => unreachable!("a tick stabs once"),
+    }
 }
 
-/// Settle the pauses a hostless tick can reach; `None` at a stab when `stop_at_stab`.
+/// Settle the pauses a hostless tick can reach, stopping at a stab when `stop_at_stab`.
 fn run_hostless(
     m: &mut Mob,
     w: &MobWorld,
@@ -1393,12 +1414,16 @@ fn run_hostless(
     events: &mut Vec<MobEvent>,
     mut progress: TickProgress,
     stop_at_stab: bool,
-) -> Option<bool> {
+) -> UntilStab {
     loop {
         progress = match progress {
-            TickProgress::Complete(kept) => return Some(kept),
-            TickProgress::Paused(Pause::Stab) if stop_at_stab => return None,
-            TickProgress::Paused(Pause::Stab) => resume_after_stab(m, w, level, events, None),
+            TickProgress::Complete(kept) => return UntilStab::Complete(kept),
+            TickProgress::Paused(Pause::Stab { events }) if stop_at_stab => {
+                return UntilStab::Stabbed { events };
+            }
+            TickProgress::Paused(Pause::Stab { .. }) => {
+                resume_after_stab(m, w, level, events, None)
+            }
             TickProgress::Paused(Pause::Consumption { decision }) => {
                 super::fox::apply_consumption(&decision, w, m, events);
                 resume_after_consumption(m, w, level, events, None)
@@ -1618,14 +1643,32 @@ fn after_base_tick(
         let from = events.len();
         super::spear_use::update_using_item(m, w, known_speed, events);
         if events.len() > from {
-            return TickProgress::Paused(Pause::Stab);
+            return TickProgress::Paused(Pause::Stab {
+                events: events.len() - from,
+            });
         }
     }
-    resume_after_stab(m, w, level, events, movement)
+    after_stab(m, w, level, events, movement)
 }
 
-/// Continue `LivingEntity.tick` after `updatingUsingItem`, once its stabs are settled.
+/// Continue `LivingEntity.tick` after `updatingUsingItem`, once its stabs are settled. A
+/// callback while settling them (an `EntityMount` of a dismounted target) may have discarded
+/// the attacker: then the tick ends there.
 pub(super) fn resume_after_stab(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    movement: Option<&mut Option<MobMovement>>,
+) -> TickProgress {
+    if m.removed {
+        return TickProgress::Complete(false);
+    }
+    after_stab(m, w, level, events, movement)
+}
+
+/// `LivingEntity.tick` after `updatingUsingItem`: a wandering trader's drink, then the rest.
+fn after_stab(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,

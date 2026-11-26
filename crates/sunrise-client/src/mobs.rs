@@ -5226,22 +5226,22 @@ impl Mob {
         self.prepare_tick();
         neutral_anger::around_tick(self, w.game_time, |m| ai::tick(m, w, level, events))
     }
-    /// [`Self::tick`], stopping after `LivingEntity.updatingUsingItem` raised stabs: `None`
-    /// then, for the caller to settle them in `events` before the mob moves, and
-    /// [`Self::resume_after_stab`] finishes the tick.
+    /// [`Self::tick`], stopping after `LivingEntity.updatingUsingItem` raised stabs, for the
+    /// caller to settle them (the last events in `events`) before the mob moves;
+    /// [`Self::resume_after_stab`] then finishes the tick.
     pub fn tick_until_stab(
         &mut self,
         w: &MobWorld,
         level: &mut DamageLevel<'_>,
         events: &mut Vec<MobEvent>,
-    ) -> Option<bool> {
+    ) -> ai::UntilStab {
         self.prepare_tick();
         neutral_anger::before_tick(self, w.game_time);
-        let kept = ai::tick_until_stab(self, w, level, events);
-        if kept.is_some() {
+        let progress = ai::tick_until_stab(self, w, level, events);
+        if matches!(progress, ai::UntilStab::Complete(_)) {
             neutral_anger::after_tick(self, w.game_time);
         }
-        kept
+        progress
     }
     /// Finish a tick that [`Self::tick_until_stab`] stopped at its stabs.
     pub fn resume_after_stab(

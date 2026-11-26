@@ -27,7 +27,8 @@ use sunrise_client::{
     },
     mobs::{
         Mob, MobData, MobEvent, MobTypes, MobWorld, PlayerView, Seen, Species, WeaponAttack,
-        WeaponHit, Who, control::Operation, seen_grid::SeenGrid, spawning::LocalDifficulty,
+        WeaponHit, Who, ai::UntilStab, control::Operation, seen_grid::SeenGrid,
+        spawning::LocalDifficulty,
     },
     world::World,
 };
@@ -1540,9 +1541,10 @@ pub fn main() -> sunrise_client::Result<()> {
                 sunrise_core::random::trace::set(true);
                 // The stabs land inside the attacker's tick, before its `aiStep`.
                 let alive = match m.tick_until_stab(&w, &mut test_level.level(), &mut events) {
-                    Some(alive) => alive,
-                    None => {
-                        settle_stabs(&mut mobs, &mut test_level, &mut events, from);
+                    UntilStab::Complete(alive) => alive,
+                    UntilStab::Stabbed { events: raised } => {
+                        let stabs = events.len() - raised;
+                        settle_stabs(&mut mobs, &mut test_level, &mut events, stabs);
                         // The game reads every mob again after a pause.
                         for m in mobs.iter() {
                             if let Some(k) = snapshot.iter().position(|e| e.id == m.id) {

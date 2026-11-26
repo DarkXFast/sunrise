@@ -690,7 +690,8 @@ pub fn resume_after_drink(
     })
 }
 
-/// Resume after the owning game settled the tick's stabs ([`super::ai::Pause::Stab`]).
+/// Resume after the owning game settled the tick's stabs ([`super::ai::Pause::Stab`]), unless
+/// settling them removed the mob.
 pub fn resume_after_stab(
     mobs: &mut JoinList<Mob>,
     index: usize,
@@ -699,6 +700,9 @@ pub fn resume_after_stab(
     events: &mut Vec<super::MobEvent>,
     movement: &mut Option<super::ai::MobMovement>,
 ) -> super::ai::TickProgress {
+    if mobs[index].removed {
+        return super::ai::TickProgress::Complete(false);
+    }
     tick_with(mobs, index, w, level, events, |m, w, level, events| {
         let progress = super::ai::resume_after_stab(m, w, level, events, Some(movement));
         if matches!(progress, super::ai::TickProgress::Complete(_)) {

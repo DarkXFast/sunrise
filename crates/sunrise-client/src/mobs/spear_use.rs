@@ -995,8 +995,10 @@ mod tests {
     }
 
     /// `LivingEntity.tick` stabs in `updatingUsingItem`, before `aiStep` moves the attacker: a
-    /// tick that stabs stops there unmoved (`Pause::Stab`) and its resume moves it, a hostless
-    /// tick runs through with the stab in its events, and a tick without one does not stop.
+    /// tick that stabs stops there unmoved (`Pause::Stab`), counting only the item use's events
+    /// (not the base tick's before them), and its resume moves it; a resume after settling the
+    /// stab removed the attacker runs none of the rest; a hostless tick runs through with the
+    /// stab in its events, and a tick without one does not stop.
     #[test]
     #[ignore = "daily"]
     fn a_mob_tick_stops_at_its_stabs_before_the_mob_moves() {
@@ -1037,14 +1039,35 @@ mod tests {
             let start = Vec3::new(0.0, 80.0, 0.0);
 
             let mut m = charging();
+            // A sound the base tick delivers (`Entity.baseTick`), before the item use.
+            let earlier = MobEvent::Sound("minecraft:entity.zombie.hurt", [0.0; 3], 1.0, 1.0);
+            m.outbox.push(earlier.clone());
             let mut level = crate::health::TestLevel::new(0);
             let mut events = Vec::new();
+            // The stab, its memory and event 2: the base tick's sound is not one of them.
             assert_eq!(
                 ai::tick_until_stab(&mut m, w, &mut level.level(), &mut events),
-                None
+                ai::UntilStab::Stabbed { events: 3 }
             );
-            assert_eq!(stabs(&events), 1);
+            assert_eq!(events.len(), 4);
+            assert!(
+                matches!(&events[0], MobEvent::Sound(id, ..) if *id == "minecraft:entity.zombie.hurt")
+            );
+            assert_eq!(stabs(&events[1..]), 1);
+            assert!(matches!(
+                events[1..],
+                [
+                    MobEvent::WeaponAttack(_),
+                    MobEvent::StabMemory { attacker: 1, .. },
+                    MobEvent::EntityEvent {
+                        mob: 1,
+                        event: 2,
+                        ..
+                    }
+                ]
+            ));
             assert_eq!((m.position, m.velocity), (start, Vec3::new(0.0, 0.0, 0.1)));
+            let paused = m.clone();
             assert!(ai::resume_hostless_after_stab(
                 &mut m,
                 w,
@@ -1053,6 +1076,36 @@ mod tests {
             ));
             assert_eq!(stabs(&events), 1);
             assert_ne!(m.position, start);
+
+            // Settling the stab discarded the attacker (an `EntityMount` callback of a target
+            // it dismounted can): its tick ends without moving, alone or with a vehicle loan.
+            let mut m = paused.clone();
+            m.removed = true;
+            let mut events = Vec::new();
+            assert!(!ai::resume_hostless_after_stab(
+                &mut m,
+                w,
+                &mut level.level(),
+                &mut events
+            ));
+            assert_eq!((m.position, m.velocity), (start, Vec3::new(0.0, 0.0, 0.1)));
+            assert!(events.is_empty());
+            let mut mobs = crate::join_seq::JoinList::default();
+            mobs.push(m);
+            let mut movement = None;
+            assert!(matches!(
+                crate::mobs::riders::resume_after_stab(
+                    &mut mobs,
+                    0,
+                    w,
+                    &mut level.level(),
+                    &mut events,
+                    &mut movement,
+                ),
+                ai::TickProgress::Complete(false)
+            ));
+            assert_eq!(mobs[0].position, start);
+            assert!(events.is_empty());
 
             let mut m = charging();
             let mut events = Vec::new();
@@ -1066,7 +1119,7 @@ mod tests {
             let mut events = Vec::new();
             assert_eq!(
                 ai::tick_until_stab(&mut m, w, &mut level.level(), &mut events),
-                Some(true)
+                ai::UntilStab::Complete(true)
             );
             assert_eq!(stabs(&events), 0);
             assert_ne!(m.position, start);
