@@ -1362,10 +1362,12 @@ pub fn tick(
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) -> bool {
-    let progress = tick_until_pause(m, w, level, events, None);
-    match run_hostless(m, w, level, events, progress, false) {
-        UntilStab::Complete(kept) => kept,
-        UntilStab::Stabbed { .. } => unreachable!("a hostless tick runs through its stabs"),
+    let mut progress = tick_until_pause(m, w, level, events, None);
+    loop {
+        progress = match progress {
+            TickProgress::Complete(kept) => return kept,
+            TickProgress::Paused(pause) => settle_hostless(m, w, level, events, pause),
+        };
     }
 }
 
@@ -1387,8 +1389,14 @@ pub fn tick_until_stab(
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) -> UntilStab {
-    let progress = tick_until_pause(m, w, level, events, None);
-    run_hostless(m, w, level, events, progress, true)
+    let mut progress = tick_until_pause(m, w, level, events, None);
+    loop {
+        progress = match progress {
+            TickProgress::Complete(kept) => return UntilStab::Complete(kept),
+            TickProgress::Paused(Pause::Stab { events }) => return UntilStab::Stabbed { events },
+            TickProgress::Paused(pause) => settle_hostless(m, w, level, events, pause),
+        };
+    }
 }
 
 /// Finish a hostless tick that [`tick_until_stab`] stopped at its stabs: none of it runs if
@@ -1399,67 +1407,54 @@ pub fn resume_hostless_after_stab(
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) -> bool {
-    let progress = resume_after_stab(m, w, level, events, None);
-    match run_hostless(m, w, level, events, progress, false) {
-        UntilStab::Complete(kept) => kept,
-        UntilStab::Stabbed { .. } => unreachable!("a tick stabs once"),
+    let mut progress = resume_after_stab(m, w, level, events, None);
+    loop {
+        progress = match progress {
+            TickProgress::Complete(kept) => return kept,
+            TickProgress::Paused(pause) => settle_hostless(m, w, level, events, pause),
+        };
     }
 }
 
-/// Settle the pauses a hostless tick can reach, stopping at a stab when `stop_at_stab`.
-fn run_hostless(
+/// Settle one pause a hostless tick can reach, without an owning host, and run on to the next.
+fn settle_hostless(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
-    mut progress: TickProgress,
-    stop_at_stab: bool,
-) -> UntilStab {
-    loop {
-        progress = match progress {
-            TickProgress::Complete(kept) => return UntilStab::Complete(kept),
-            TickProgress::Paused(Pause::Stab { events }) if stop_at_stab => {
-                return UntilStab::Stabbed { events };
+    pause: Pause,
+) -> TickProgress {
+    match pause {
+        Pause::Stab { .. } => resume_after_stab(m, w, level, events, None),
+        Pause::Consumption { decision } => {
+            super::fox::apply_consumption(&decision, w, m, events);
+            resume_after_consumption(m, w, level, events, None)
+        }
+        Pause::Breathing { air, known_speed } => {
+            let breath = Some(air.step.vanilla);
+            resume_after_breathing(m, w, level, events, air, known_speed, breath, None)
+        }
+        Pause::Drink { stack, resume } => {
+            // The hostless probe runs the same drink's built-in behaviour.
+            if stack.potion().unwrap_or(&stack.item) == "minecraft:healing" {
+                m.heal(w.loop_context, &|| w.side.hit_reads(), 4.0);
             }
-            TickProgress::Paused(Pause::Stab { .. }) => {
-                resume_after_stab(m, w, level, events, None)
+            if let Some(effect) = drink_potion_effect(&stack) {
+                m.add_effect_instance(crate::brewing::namespaced(effect.id), effect);
             }
-            TickProgress::Paused(Pause::Consumption { decision }) => {
-                super::fox::apply_consumption(&decision, w, m, events);
-                resume_after_consumption(m, w, level, events, None)
+            if &*stack.item == "minecraft:milk_bucket" {
+                m.apply_consume_effect(&crate::items::ConsumeEffect::ClearAllEffects);
             }
-            TickProgress::Paused(Pause::Breathing { air, known_speed }) => {
-                let breath = Some(air.step.vanilla);
-                resume_after_breathing(m, w, level, events, air, known_speed, breath, None)
-            }
-            TickProgress::Paused(Pause::Drink { stack, resume }) => {
-                // The hostless probe runs the same drink's built-in behaviour.
-                if stack.potion().unwrap_or(&stack.item) == "minecraft:healing" {
-                    m.heal(w.loop_context, &|| w.side.hit_reads(), 4.0);
-                }
-                if let Some(effect) = drink_potion_effect(&stack) {
-                    m.add_effect_instance(crate::brewing::namespaced(effect.id), effect);
-                }
-                if &*stack.item == "minecraft:milk_bucket" {
-                    m.apply_consume_effect(&crate::items::ConsumeEffect::ClearAllEffects);
-                }
-                m.extra.set_main_hand_stack(None);
-                resume_after_drink(m, w, level, events, resume, None)
-            }
-            TickProgress::Paused(Pause::AfterDamage(resume)) => {
-                resume_after_damage(m, w, level, events, resume, None)
-            }
-            TickProgress::Paused(
-                Pause::Equipment { .. }
-                | Pause::Trample(_)
-                | Pause::FallToPassengers(_)
-                | Pause::RegisterBehaviors { .. }
-                | Pause::Breeding { .. },
-            ) => unreachable!("a hostless tick cannot reach this pause"),
-            TickProgress::Paused(Pause::InsideEffects(_)) => {
-                unreachable!("hostless inside-block flush cannot pause")
-            }
-        };
+            m.extra.set_main_hand_stack(None);
+            resume_after_drink(m, w, level, events, resume, None)
+        }
+        Pause::AfterDamage(resume) => resume_after_damage(m, w, level, events, resume, None),
+        Pause::Equipment { .. }
+        | Pause::Trample(_)
+        | Pause::FallToPassengers(_)
+        | Pause::RegisterBehaviors { .. }
+        | Pause::Breeding { .. } => unreachable!("a hostless tick cannot reach this pause"),
+        Pause::InsideEffects(_) => unreachable!("hostless inside-block flush cannot pause"),
     }
 }
 
