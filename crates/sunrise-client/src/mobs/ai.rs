@@ -1170,6 +1170,10 @@ pub enum Pause {
     },
     /// The mob's `InsideEffects` collector is ready to flush against the live level.
     InsideEffects(InsidePause),
+    /// `LivingEntity.updatingUsingItem` raised this tick's spear stabs. `LivingEntity.stabAttack`
+    /// hurts and pushes each target and slows the attacker (`causeExtraKnockback`) before
+    /// `aiStep` moves it, so the owner settles the tick's events so far before resuming.
+    Stab,
 }
 
 /// Where a mob tick paused for staged `register_behaviors`.
@@ -1346,17 +1350,55 @@ impl AirPause {
 }
 
 /// Run a whole mob tick when no owning-host pause is needed by the caller: the
-/// mods are not asked about its air, and a fox consumes without a host.
+/// mods are not asked about its air, and a fox consumes without a host. Stabs are
+/// left in `events` for the caller, after the tick.
 pub fn tick(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) -> bool {
-    let mut progress = tick_until_pause(m, w, level, events, None);
+    let progress = tick_until_pause(m, w, level, events, None);
+    run_hostless(m, w, level, events, progress, false).expect("a hostless tick runs through stabs")
+}
+
+/// [`tick`], stopping at [`Pause::Stab`] so the caller settles the stabs in `events` before
+/// the mob moves: `None` then, and [`resume_hostless_after_stab`] finishes the tick.
+pub fn tick_until_stab(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+) -> Option<bool> {
+    let progress = tick_until_pause(m, w, level, events, None);
+    run_hostless(m, w, level, events, progress, true)
+}
+
+/// Finish a hostless tick that [`tick_until_stab`] stopped at its stabs.
+pub fn resume_hostless_after_stab(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+) -> bool {
+    let progress = resume_after_stab(m, w, level, events, None);
+    run_hostless(m, w, level, events, progress, false).expect("a tick stabs once")
+}
+
+/// Settle the pauses a hostless tick can reach; `None` at a stab when `stop_at_stab`.
+fn run_hostless(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    mut progress: TickProgress,
+    stop_at_stab: bool,
+) -> Option<bool> {
     loop {
         progress = match progress {
-            TickProgress::Complete(kept) => return kept,
+            TickProgress::Complete(kept) => return Some(kept),
+            TickProgress::Paused(Pause::Stab) if stop_at_stab => return None,
+            TickProgress::Paused(Pause::Stab) => resume_after_stab(m, w, level, events, None),
             TickProgress::Paused(Pause::Consumption { decision }) => {
                 super::fox::apply_consumption(&decision, w, m, events);
                 resume_after_consumption(m, w, level, events, None)
@@ -1573,8 +1615,23 @@ fn after_base_tick(
     }
     // LivingEntity.tick: updatingUsingItem, the stab of a spear in use.
     if m.alive() {
+        let from = events.len();
         super::spear_use::update_using_item(m, w, known_speed, events);
+        if events.len() > from {
+            return TickProgress::Paused(Pause::Stab);
+        }
     }
+    resume_after_stab(m, w, level, events, movement)
+}
+
+/// Continue `LivingEntity.tick` after `updatingUsingItem`, once its stabs are settled.
+pub(super) fn resume_after_stab(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    movement: Option<&mut Option<MobMovement>>,
+) -> TickProgress {
     if m.alive()
         && m.species() == Species::WanderingTrader
         && let Some(stack) = super::trader::tick_drink(m, events)

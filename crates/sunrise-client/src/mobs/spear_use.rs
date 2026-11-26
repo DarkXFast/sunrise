@@ -994,6 +994,85 @@ mod tests {
         assert_eq!(charge(Some(-2.0)), (1.0, vec![4.0]));
     }
 
+    /// `LivingEntity.tick` stabs in `updatingUsingItem`, before `aiStep` moves the attacker: a
+    /// tick that stabs stops there unmoved (`Pause::Stab`) and its resume moves it, a hostless
+    /// tick runs through with the stab in its events, and a tick without one does not stop.
+    #[test]
+    #[ignore = "daily"]
+    fn a_mob_tick_stops_at_its_stabs_before_the_mob_moves() {
+        use crate::mobs::ai;
+        let target = Mob::new(
+            2,
+            crate::mobs::sensor_scan_tests::kind(),
+            Vec3::new(0.0, 80.0, 1.6),
+            0.0,
+        );
+        let others = [target.seen(None, &crate::items::Items::empty())];
+        let charging = || {
+            let mut m = spear_zombie();
+            assert!(start_using_item(&mut m, false));
+            m.extra.using_item = main_hand_kinetic(&m).expect("an iron spear").delay_ticks + 1;
+            m.position = Vec3::new(0.0, 80.0, 0.0);
+            // Last tick it ran 0.1 blocks toward the target (`Entity.lastKnownSpeed`).
+            m.previous = Vec3::new(0.0, 80.0, -0.1);
+            m.velocity = Vec3::new(0.0, 0.0, 0.1);
+            m
+        };
+        let stabs = |events: &[MobEvent]| {
+            events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        MobEvent::WeaponAttack(WeaponHit {
+                            target: Who::Mob(2),
+                            attack: WeaponAttack::Stab { .. },
+                            ..
+                        })
+                    )
+                })
+                .count()
+        };
+        assert!(crate::mobs::world::with_test_world(&others, |w, _| {
+            let start = Vec3::new(0.0, 80.0, 0.0);
+
+            let mut m = charging();
+            let mut level = crate::health::TestLevel::new(0);
+            let mut events = Vec::new();
+            assert_eq!(
+                ai::tick_until_stab(&mut m, w, &mut level.level(), &mut events),
+                None
+            );
+            assert_eq!(stabs(&events), 1);
+            assert_eq!((m.position, m.velocity), (start, Vec3::new(0.0, 0.0, 0.1)));
+            assert!(ai::resume_hostless_after_stab(
+                &mut m,
+                w,
+                &mut level.level(),
+                &mut events
+            ));
+            assert_eq!(stabs(&events), 1);
+            assert_ne!(m.position, start);
+
+            let mut m = charging();
+            let mut events = Vec::new();
+            assert!(ai::tick(&mut m, w, &mut level.level(), &mut events));
+            assert_eq!(stabs(&events), 1);
+            assert_ne!(m.position, start);
+
+            // Not yet past the spear's delay: nothing to stab.
+            let mut m = charging();
+            m.extra.using_item = 1;
+            let mut events = Vec::new();
+            assert_eq!(
+                ai::tick_until_stab(&mut m, w, &mut level.level(), &mut events),
+                Some(true)
+            );
+            assert_eq!(stabs(&events), 0);
+            assert_ne!(m.position, start);
+        }));
+    }
+
     /// The counters a mod's `living_set_item_use_remaining` leaves a 72000
     /// tick use at (remaining `i32::MIN`, `i32::MAX`, 0 and -5): the next
     /// ticks count on without overflowing, and the use keeps running.

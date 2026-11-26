@@ -811,6 +811,14 @@ impl Game<'_> {
                                 &mut events,
                             )
                         }
+                        Some(Pause::Stab) => sunrise_client::mobs::riders::resume_after_stab(
+                            &mut mobs,
+                            i,
+                            &w,
+                            &mut level,
+                            &mut events,
+                            &mut movement,
+                        ),
                         Some(Pause::Consumption { .. }) => {
                             sunrise_client::mobs::riders::resume_after_consumption(
                                 &mut mobs,
@@ -1277,6 +1285,23 @@ impl Game<'_> {
                         Pause::InsideEffects(inside) => {
                             let effects = std::mem::take(&mut inside.effects);
                             self.flush_mob_inside_live(inside.mob, inside.join, effects);
+                        }
+                        Pause::Stab => {
+                            // `LivingEntity.stabAttack` hurts, pushes and slows the attacker
+                            // before its `aiStep`: the tick's events so far land now, routed
+                            // to the guest they act on as at the end of a tick.
+                            let mut stabs = events.split_off(resume_from);
+                            let mut routed = Vec::new();
+                            route_player_events(
+                                &mut stabs,
+                                0,
+                                resume_guest,
+                                &guest_ids,
+                                &mut routed,
+                                id,
+                            );
+                            let _ = self.handle_mob_events(stabs);
+                            self.lan_guest_mob_events(&mut routed);
                         }
                     }
                 }
@@ -1964,3 +1989,7 @@ mod hoglin_routing_tests {
 #[cfg(test)]
 #[path = "mob_tick_access_tests.rs"]
 mod mob_tick_access_tests;
+
+#[cfg(test)]
+#[path = "stab_pause_tests.rs"]
+mod stab_pause_tests;

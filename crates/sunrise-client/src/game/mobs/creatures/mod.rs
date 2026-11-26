@@ -2268,7 +2268,8 @@ impl Game<'_> {
             }
         }
     }
-    /// Settle `Mob.doHurtTarget` / `LivingEntity.stabAttack` after the borrowed tick.
+    /// Settle `Mob.doHurtTarget` after the borrowed tick, or `LivingEntity.stabAttack` at the
+    /// attacker's `Pause::Stab`, before its `aiStep`.
     fn mob_weapon_attack(&mut self, hit: sunrise_client::mobs::WeaponHit) -> bool {
         use sunrise_client::mobs::{WeaponAttack, WeaponHit};
         let WeaponHit {
