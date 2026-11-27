@@ -813,11 +813,7 @@ impl Renderer {
                 )
             })
             .collect();
-        let material_animations = animations
-            .iter()
-            .filter(|a| a.has_materials())
-            .cloned()
-            .collect();
+        let material_animations = material_animation::MaterialAnimations::new(animations);
         let animations = animate::SpriteAnimator::new(
             &device,
             animations,
@@ -2296,6 +2292,7 @@ impl Renderer {
                 ),
                 pack_iris: false,
             },
+            previous.map(|renderer| renderer.mod_gpu()),
         );
         Ok(Self {
             display: None,

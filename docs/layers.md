@@ -78,7 +78,7 @@ Vanilla Minecraft: Java Edition 26.3, and nothing else.
 
 ### Portable crates
 
-`sunrise-core`, `sunrise-world`, `sunrise-protocol`, `sunrise-items`, `sunrise-command`, `sunrise-client-core`
+`sunrise-core`, `sunrise-world`, `sunrise-protocol`, `sunrise-items`, `sunrise-command`, `sunrise-game-data`
 and `sunrise-assets` hold vanilla's rules and data with no desktop in them. `sunrise-threads` provides worker
 scheduling and sampling, and `sunrise-java-properties` reads and writes Java-properties files with the standard
 library alone. These portable crates have no window, GPU, sound, gamepad or clipboard library, no HTTP client,
@@ -693,7 +693,8 @@ Rust and finds every host. It skips tests, placeholders (`example.com`, `*.test`
   entry applies only in that file;
 - `allowed`: today's addresses outside the list file, as "path host".
 
-`allowed` only shrinks. A branch may move an entry with its code, but it may not add a host or grow the list.
+`allowed` only shrinks. Remove entries the shipped source no longer uses. A branch may move an entry with its code,
+but it may not add a host or grow the list.
 
 Vanilla's endpoints (engine, the same as Java Edition):
 
